@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/mount.h>
 #include <fs_mgr.h>
@@ -363,6 +364,14 @@ static int do_sdcard_mount(RecoveryUI* ui)
                v->fs_type.c_str(),
                v->flags,
                v->fs_options.c_str());
+    if (rc) {
+        LOG(INFO) << "Failed to mount sdcard as vfat. Trying exfat";
+        rc = mount(SDCARD_BLK_0_PATH,
+                   v->mount_point.c_str(),
+                   "exfat",
+                   v->flags,
+                   v->fs_options.c_str());
+    }
   }
   else if (check_mmc_is_sdcard(MMC_1_TYPE_PATH) == 0) {
     LOG(INFO) << "Mounting sdcard on " << SDCARD_BLK_1_PATH;
@@ -371,6 +380,14 @@ static int do_sdcard_mount(RecoveryUI* ui)
                v->fs_type.c_str(),
                v->flags,
                v->fs_options.c_str());
+    if (rc) {
+        LOG(INFO) << "Failed to mount sdcard as vfat. Trying exfat";
+        rc = mount(SDCARD_BLK_1_PATH,
+                   v->mount_point.c_str(),
+                   "exfat",
+                   v->flags,
+                   v->fs_options.c_str());
+    }
   }
   else if (check_mmc_is_sdcard(SDEXPRESS_0_TYPE_PATH) == 0) {
     LOG(INFO) << "Mounting sdexpress on " << SDEXPRESS_BLK_0_PATH;
@@ -567,6 +584,9 @@ static Device::BuiltinAction PromptAndWait(Device* device, InstallResult status)
         if (status == INSTALL_REBOOT) {
           return reboot_action;
         }
+        if (status == INSTALL_NONE) {
+          update_in_progress = false;
+        }
 
         if (status == INSTALL_SUCCESS) {
           update_in_progress = false;
@@ -595,16 +615,26 @@ static Device::BuiltinAction PromptAndWait(Device* device, InstallResult status)
         break;
       }
 
-      case Device::MOUNT_SYSTEM:
-        // For Virtual A/B, set up the snapshot devices (if exist).
-        if (!CreateSnapshotPartitions()) {
-          ui->Print("Virtual A/B: snapshot partitions creation failed.\n");
-          break;
-        }
-        if (ensure_path_mounted_at(android::fs_mgr::GetSystemRoot(), "/mnt/system") != -1) {
-          ui->Print("Mounted /system.\n");
+      case Device::MOUNT_SYSTEM: {
+        static bool mounted = false;
+        if (!mounted) {
+          // For Virtual A/B, set up the snapshot devices (if exist).
+          if (!logical_partitions_mapped() && !CreateSnapshotPartitions()) {
+            ui->Print("Virtual A/B: snapshot partitions creation failed.\n");
+            break;
+          }
+          if (ensure_path_mounted_at(android::fs_mgr::GetSystemRoot(), "/mnt/system") != -1) {
+            ui->Print("Mounted /mnt/system.\n");
+            mounted = true;
+          }
+        } else {
+          if (umount("/mnt/system") != -1) {
+            ui->Print("Unmounted /mnt/system.\n");
+            mounted = false;
+          }
         }
         break;
+      }
 
       case Device::KEY_INTERRUPTED:
         return Device::KEY_INTERRUPTED;

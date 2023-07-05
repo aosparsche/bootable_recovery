@@ -256,6 +256,14 @@ static int do_sdcard_mount() {
                v->fs_type.c_str(),
                v->flags,
                v->fs_options.c_str());
+    if (rc) {
+        LOG(INFO) << "Failed to mount sdcard as vfat. Trying exfat";
+        rc = mount(SDCARD_BLK_0_PATH,
+                   v->mount_point.c_str(),
+                   "exfat",
+                   v->flags,
+                   v->fs_options.c_str());
+    }
   }
   else if (check_mmc_is_sdcard(MMC_1_TYPE_PATH) == 0) {
     LOG(INFO) << "Mounting sdcard on " << SDCARD_BLK_1_PATH;
@@ -264,6 +272,14 @@ static int do_sdcard_mount() {
                v->fs_type.c_str(),
                v->flags,
                v->fs_options.c_str());
+    if (rc) {
+        LOG(INFO) << "Failed to mount sdcard as vfat. Trying exfat";
+        rc = mount(SDCARD_BLK_1_PATH,
+                   v->mount_point.c_str(),
+                   "exfat",
+                   v->flags,
+                   v->fs_options.c_str());
+    }
   }
   else if (check_mmc_is_sdcard(SDEXPRESS_0_TYPE_PATH) == 0) {
     LOG(INFO) << "Mounting sdexpress on " << SDEXPRESS_BLK_0_PATH;
@@ -295,14 +311,14 @@ InstallResult ApplyFromSdcard(Device* device) {
 
   if (do_sdcard_mount() != 0) {
     LOG(ERROR) << "\nFailed to mount sdcard\n";
-    return INSTALL_ERROR;
+    return INSTALL_NONE;
   }
 
   std::string path = BrowseDirectory(SDCARD_ROOT, device, ui);
   if (path.empty()) {
     LOG(ERROR) << "\n-- No package file selected.\n";
     ensure_path_unmounted(SDCARD_ROOT);
-    return INSTALL_ERROR;
+    return INSTALL_NONE;
   }
 
   // Hint the install function to read from a block map file.

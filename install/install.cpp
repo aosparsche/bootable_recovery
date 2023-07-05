@@ -46,6 +46,7 @@
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 
+#include "install/snapshot_utils.h"
 #include "install/spl_check.h"
 #include "install/wipe_data.h"
 #include "otautil/error_code.h"
@@ -80,7 +81,6 @@ bool ReadMetadataFromPackage(ZipArchiveHandle zip, std::map<std::string, std::st
   static constexpr const char* METADATA_PATH = "META-INF/com/android/metadata";
   ZipEntry64 entry;
   if (FindEntry(zip, METADATA_PATH, &entry) != 0) {
-    LOG(ERROR) << "Failed to find " << METADATA_PATH;
     return false;
   }
 
@@ -160,29 +160,6 @@ static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& me
     LOG(ERROR) << "Package is for source build " << pkg_pre_build_fingerprint << " but expected "
                << device_fingerprint;
     return false;
-  }
-
-  // Check for downgrade version.
-  int64_t build_timestamp =
-      android::base::GetIntProperty("ro.build.date.utc", std::numeric_limits<int64_t>::max());
-  int64_t pkg_post_timestamp = 0;
-  // We allow to full update to the same version we are running, in case there
-  // is a problem with the current copy of that version.
-  auto pkg_post_timestamp_string = get_value(metadata, "post-timestamp");
-  if (pkg_post_timestamp_string.empty() ||
-      !android::base::ParseInt(pkg_post_timestamp_string, &pkg_post_timestamp) ||
-      pkg_post_timestamp < build_timestamp) {
-    if (get_value(metadata, "ota-downgrade") != "yes") {
-      LOG(ERROR) << "Update package is older than the current build, expected a build "
-                    "newer than timestamp "
-                 << build_timestamp << " but package has timestamp " << pkg_post_timestamp
-                 << " and downgrade not allowed.";
-      return false;
-    }
-    if (pkg_pre_build_fingerprint.empty()) {
-      LOG(ERROR) << "Downgrade package must have a pre-build version set, not allowed.";
-      return false;
-    }
   }
 
   return true;
@@ -359,16 +336,13 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
   auto ui = device->GetUI();
   std::map<std::string, std::string> metadata;
   auto zip = package->GetZipArchiveHandle();
-  if (!ReadMetadataFromPackage(zip, &metadata)) {
-    LOG(ERROR) << "Failed to parse metadata in the zip file";
-    return INSTALL_CORRUPT;
-  }
+  bool has_metadata = ReadMetadataFromPackage(zip, &metadata);
 
-  bool package_is_ab = get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
+  bool package_is_ab = has_metadata && get_value(metadata, "ota-type") == OtaTypeToString(OtaType::AB);
   bool device_supports_ab = android::base::GetBoolProperty("ro.build.ab_update", false);
-  bool ab_device_supports_nonab =
-      android::base::GetBoolProperty("ro.virtual_ab.allow_non_ab", false);
+  bool ab_device_supports_nonab = true;
   bool device_only_supports_ab = device_supports_ab && !ab_device_supports_nonab;
+  bool device_supports_virtual_ab = android::base::GetBoolProperty("ro.virtual_ab.enabled", false);
 
   const auto current_spl = android::base::GetProperty("ro.build.version.security_patch", "");
   if (ViolatesSPLDowngrade(zip, current_spl)) {
@@ -389,6 +363,15 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
       log_buffer->push_back(android::base::StringPrintf("error: %d", kUpdateBinaryCommandFailure));
       return INSTALL_ERROR;
     }
+  }
+
+  if (!package_is_ab && !logical_partitions_mapped()) {
+    CreateSnapshotPartitions();
+    map_logical_partitions();
+  } else if (package_is_ab && device_supports_virtual_ab && logical_partitions_mapped()) {
+    LOG(ERROR) << "Logical partitions are mapped. "
+               << "Please reboot recovery before installing an OTA update.";
+    return INSTALL_ERROR;
   }
 
   ReadSourceTargetBuild(metadata, log_buffer);
@@ -566,12 +549,6 @@ static InstallResult VerifyAndInstallPackage(Package* package, bool* wipe_cache,
   // Give verification half the progress bar...
   ui->SetProgressType(RecoveryUI::DETERMINATE);
   ui->ShowProgress(VERIFICATION_PROGRESS_FRACTION, VERIFICATION_PROGRESS_TIME);
-
-  // Verify package.
-  if (!verify_package(package, ui)) {
-    log_buffer->push_back(android::base::StringPrintf("error: %d", kZipVerificationFailure));
-    return INSTALL_CORRUPT;
-  }
 
   // Verify and install the contents of the package.
   ui->Print("Installing update...\n");
